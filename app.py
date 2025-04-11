@@ -1,9 +1,10 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template_string
 from werkzeug.utils import secure_filename
 from datetime import datetime
 import os
-
+import pymongo
 from skill_extractor import SkillExtractor
+from job_matcher import SkillMatcher
 from pymongo import MongoClient
 from dotenv import load_dotenv
 
@@ -14,8 +15,9 @@ MONGO_URI = os.getenv("MONGO_URI")
 # === Initialize Flask App ===
 app = Flask(__name__)
 extractor = SkillExtractor(gpu=False)
+matcher = SkillMatcher(mongo_uri=MONGO_URI, gpu=False)
 
-# === Upload Configuration ===
+# === Upload Configuration ===  
 UPLOAD_FOLDER = 'static/uploads'
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'pdf'}
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
@@ -24,7 +26,7 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 # === Connect to MongoDB ===
 try:
     mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
-    mongo_client.admin.command('ping')  # Check connection
+    mongo_client.admin.command('ping')
     print("✅ Connected to MongoDB Atlas")
     db = mongo_client["jobfinder"]
     skills_collection = db["extracted_skills"]
@@ -37,20 +39,18 @@ def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 # === Routes ===
-
 @app.route('/')
 def home():
-    return """
-    <h1>Resume Skill Extractor</h1>
-    <p>POST resume images to /extract-skills</p>
-    <form action="/extract-skills" method="post" enctype="multipart/form-data">
-        <input type="file" name="file">
-        <input type="submit" value="Upload">
-    </form>
-    """
+    return render_template_string('''
+        <h2>📄 Upload your resume</h2>
+        <form action="/process" method="post" enctype="multipart/form-data">
+            <input type="file" name="file" required>
+            <button type="submit">Extract & Match Skills</button>
+        </form>
+    ''')
 
-@app.route('/extract-skills', methods=['POST'])
-def extract_skills():
+@app.route('/process', methods=['POST'])
+def process_resume():
     if 'file' not in request.files:
         return jsonify({'error': 'No file part'}), 400
 
@@ -64,12 +64,16 @@ def extract_skills():
         file.save(filepath)
 
         try:
+            # Extract skills and text
             skills, extracted_text = extractor.process_resume_image(filepath)
+
+            # Match skills
+            match_results = matcher.process_resume(filepath)
 
             if os.path.exists(filepath):
                 os.remove(filepath)
 
-            # Store result in MongoDB
+            # Save to MongoDB
             if mongo_client:
                 skills_collection.insert_one({
                     "skills": skills,
@@ -77,11 +81,30 @@ def extract_skills():
                     "uploaded_at": datetime.utcnow()
                 })
 
-            return jsonify({
-                'status': 'success',
-                'skills': skills,
-                'extracted_text': extracted_text
-            })
+            # HTML output showing skills + top matching job
+            top_match = match_results['matching_results'][0] if match_results['matching_results'] else {}
+
+            return render_template_string('''
+                <h2>✅ Skills Extracted</h2>
+                <ul>
+                    {% for skill in skills %}
+                        <li>{{ skill }}</li>
+                    {% endfor %}
+                </ul>
+
+                <h2>🔍 Top Job Match</h2>
+                {% if top_match %}
+                    <p><strong>Title:</strong> {{ top_match['job_title'] }}</p>
+                    <p><strong>Match Score:</strong> {{ top_match['match_score'] }}</p>
+                    <p><strong>Weighted Score:</strong> {{ top_match['weighted_score'] }}</p>
+                    <p><strong>Matched Skills:</strong> {{ top_match['matches']|join(', ') }}</p>
+                {% else %}
+                    <p>No matches found.</p>
+                {% endif %}
+
+                <br>
+                <a href="/">⬅ Try another resume</a>
+            ''', skills=skills, top_match=top_match)
 
         except Exception as e:
             return jsonify({'error': str(e)}), 500
@@ -92,7 +115,6 @@ def extract_skills():
 def get_results():
     if not mongo_client:
         return jsonify({"error": "MongoDB not connected"}), 500
-
     results = list(skills_collection.find({}, {'_id': 0}))
     return jsonify(results)
 
