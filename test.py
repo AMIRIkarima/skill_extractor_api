@@ -1,10 +1,14 @@
-from pymongo import MongoClient
+import os
+from dotenv import load_dotenv
+import pymongo
 
-uri = "mongodb+srv://ayamoukil2210:XuQx3XWilrNaVdRB@cluster0.l28hq.mongodb.net/job_finder?retryWrites=true&w=majority"
+load_dotenv()
+MONGO_URI = os.getenv("MONGO_URI")
 
 try:
-    client = MongoClient(uri, serverSelectionTimeoutMS=50000)
-    client.admin.command('ping')
-    print("✅ Connected to MongoDB Atlas!")
+    client = pymongo.MongoClient(MONGO_URI)
+    db = client["job_finder"]
+    collection = db["offers"]
+    print("✅ Connexion réussie à MongoDB Atlas !")
 except Exception as e:
-    print("❌ Connection failed:", e)
+    print(f"❌ Erreur de connexion : {e}")
